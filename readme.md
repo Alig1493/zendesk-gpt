@@ -1,5 +1,8 @@
 # ZENDESK GPT 
 
+Resources: [Neum AI blogpost](https://www.neum.ai/post/llm-spreadsheets), 
+[langchain](https://python.langchain.com/docs/get_started), [ollama](https://ollama.ai)
+
 * Allows to ingest zendesk tickets and query them using local machine 
 * Highly recommended to run this on a local environment
 * Pre-requisites: [Ollama](https://ollama.ai/), `requirements.txt`

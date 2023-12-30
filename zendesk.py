@@ -5,7 +5,7 @@ from zenpy import Zenpy
 CREDS = {
     "email": os.getenv("ZENDESK_EMAIL"),
     "token": os.getenv("ZENDESK_API_KEY"),
-    "subdomain": os.getenv("ZENDESK_SUBDOMAIN")
+    "subdomain": os.getenv("ZENDESK_SUBDOMAIN"),
 }
 
 
