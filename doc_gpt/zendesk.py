@@ -21,5 +21,5 @@ for ticket in tickets:
     ticket_list.append(ticket.to_dict())
 
 
-with open("zendesk.json", "w+") as zendesk_json_file:
+with open("source_files/zendesk.json", "w+") as zendesk_json_file:
     zendesk_json_file.write(json.dumps(ticket_list, indent=2))
