@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 import uuid
 from asyncio import Future
 from datetime import datetime
@@ -46,15 +47,20 @@ class Query(QueryResponse):
 def task_done_callback(request: Request, task: Future) -> None:
     try:
         request.session[task.get_name()] = task.result()
-    except Exception as exc:
+    except Exception:
         request.session[task.get_name()] = HTTPException(400, task.result())
 
 
 @app.post("/", response_model=Query)
-@limiter.limit("5/minute")
+@limiter.limit("20/day")
 async def root(request: Request, query: Query, token: Annotated[str | None, Header()]):
-    task = asyncio.create_task(run_query_prompt(query.prompt), name=str(query.id))
-    task.add_done_callback(partial(task_done_callback, request))
+    async def task_worker():
+        task = asyncio.create_task(run_query_prompt(query.prompt), name=str(query.id))
+        task.add_done_callback(partial(task_done_callback, request))
+        await task
+
+    th = threading.Thread(target=lambda: asyncio.run(task_worker()))
+    th.start()
     print(query.id)
     result = request.session.get("query_response", "Come back in a few mins to get the results")
     return {
