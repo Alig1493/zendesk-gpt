@@ -46,17 +46,19 @@ def get_documents_from_json(filename: str = None) -> List[Document]:
                 to_metadata[key] = value
             if key in COLUMNS_TO_EMBED:
                 values_to_embed[key] = value
-        to_embed = "\n".join(
+        to_embed = ",".join(
             f"{k.strip()}: {v.strip() if isinstance(v, str) else v}"
             for k, v in values_to_embed.items()
         )
+        to_embed += "\n"
         docs.append(Document(page_content=to_embed, metadata=to_metadata))
+
     return docs
 
 
 def load_json_dict_list_to_db(filename: str = None) -> Chroma:
     splitter = CharacterTextSplitter(
-        separator="\n", chunk_size=200, chunk_overlap=0, length_function=len
+        separator="\n", chunk_size=490, chunk_overlap=50, length_function=len
     )
     documents = splitter.split_documents(
         get_documents_from_json(filename)
