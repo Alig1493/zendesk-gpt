@@ -3,6 +3,7 @@ import os
 import threading
 import uuid
 from asyncio import Future
+from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import partial
 from typing import Annotated
@@ -21,10 +22,19 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 
 from doc_gpt.json_gpt import run_query_prompt
+threads = set()
+
+
+@asynccontextmanager
+async def thread_cleanup(app: FastAPI):
+    yield
+    for thread in threads:
+        print(thread.name)
+        thread.join(10)
 
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI()
+app = FastAPI(lifespan=thread_cleanup)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SessionMiddleware, secret_key=uuid.uuid4(), max_age=None)
@@ -45,6 +55,8 @@ class Query(QueryResponse):
 
 
 def task_done_callback(request: Request, task: Future) -> None:
+    print("INSIDE task_done_callback " * 10)
+    print(request, task)
     try:
         request.session[task.get_name()] = task.result()
     except Exception:
@@ -54,13 +66,14 @@ def task_done_callback(request: Request, task: Future) -> None:
 @app.post("/", response_model=Query)
 @limiter.limit("20/day")
 async def root(request: Request, query: Query, token: Annotated[str | None, Header()]):
-    async def task_worker():
+    async def task_worker(request: Request):
         task = asyncio.create_task(run_query_prompt(query.prompt), name=str(query.id))
         task.add_done_callback(partial(task_done_callback, request))
         await task
 
-    th = threading.Thread(target=lambda: asyncio.run(task_worker()))
+    th = threading.Thread(target=lambda request: asyncio.run(task_worker(request)), args=(request,), daemon=True)
     th.start()
+    threads.add(th)
     print(query.id)
     result = request.session.get("query_response", "Come back in a few mins to get the results")
     return {
@@ -71,7 +84,8 @@ async def root(request: Request, query: Query, token: Annotated[str | None, Head
 
 @app.get("/tasks/{task_name}", response_model=QueryResponse)
 async def get_task_by_id(request: Request, task_name: str, token: Annotated[str | None, Header()]):
-    if asyncio.current_task().get_name() == task_name:
+    print(request.session.get(task_name))
+    if task_name in request.session:
         try:
             return QueryResponse(**{"response": request.session[task_name], "id": task_name}).dict()
         except HTTPException as http_exc:
