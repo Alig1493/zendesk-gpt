@@ -1,6 +1,8 @@
 import asyncio
+import json
 import os
 import threading
+import traceback
 import uuid
 from asyncio import Future
 from contextlib import asynccontextmanager
@@ -14,6 +16,7 @@ from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests
 from google.oauth2 import id_token
 from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -21,6 +24,7 @@ from slowapi.util import get_remote_address
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import RedirectResponse
 
+from database import MongoDB
 from doc_gpt.json_gpt import run_query_prompt
 threads = set()
 
@@ -38,6 +42,7 @@ app = FastAPI(lifespan=thread_cleanup)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SessionMiddleware, secret_key=uuid.uuid4(), max_age=None)
+DB = MongoDB()
 
 
 class OAuthToken(BaseModel):
@@ -142,14 +147,32 @@ async def callback(request: Request):
     request.session.clear()
     try:
         flow.fetch_token(code=code)
-        # user_info_service = build("oauth2", "v2", credentials=flow.credentials)
-        # user_info = user_info_service.userinfo().get().execute()
+        user_info_service = build("oauth2", "v2", credentials=flow.credentials)
+        user_info = user_info_service.userinfo().get().execute()
+        print(user_info, dir(user_info))
         print(flow.credentials.to_json())
+        await DB.create_collection("users")
+        await DB.create_indexes("users", ["email"])
+        await DB.update(
+            collection_name="users",
+            query={"email": user_info.get("email")},
+            data=user_info,
+            upsert=True
+        )
+        await DB.create_collection("credentials")
+        await DB.create_indexes("credentials", ["email"])
+        await DB.update(
+            collection_name="credentials",
+            query={"email": user_info.get("email")},
+            data=json.loads(flow.credentials.to_json()),
+            upsert=True
+        )
         return {
             "token": flow.credentials.token,
             "id_token": flow.credentials.id_token
         }
     except Exception as flow_exception:
+        print(traceback.format_exc())
         raise HTTPException(status_code=400, detail=str(flow_exception))
 
 
