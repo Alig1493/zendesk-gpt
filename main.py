@@ -4,20 +4,18 @@ import os
 import threading
 import traceback
 import uuid
-from asyncio import Future
 from contextlib import asynccontextmanager
 from datetime import datetime
-from functools import partial
 from typing import Annotated
 
 import httpx
+from bson import ObjectId
 from fastapi import FastAPI, Request, HTTPException, Header
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests
 from google.oauth2 import id_token
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -26,6 +24,9 @@ from starlette.responses import RedirectResponse
 
 from database import MongoDB
 from doc_gpt.json_gpt import run_query_prompt
+from models.auth import OAuthToken
+from models.query import QueryResponse, Query
+
 threads = set()
 
 
@@ -45,59 +46,100 @@ app.add_middleware(SessionMiddleware, secret_key=uuid.uuid4(), max_age=None)
 DB = MongoDB()
 
 
-class OAuthToken(BaseModel):
-    id_token: str
-
-
-class QueryResponse(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    response: str | None = None
-    error: str | None = None
-
-
-class Query(QueryResponse):
-    prompt: str
-
-
-def task_done_callback(request: Request, task: Future) -> None:
+async def task_done_callback(object_id: str, result: str) -> None:
     print("INSIDE task_done_callback " * 10)
-    print(request, task)
-    try:
-        request.session[task.get_name()] = task.result()
-    except Exception:
-        request.session[task.get_name()] = HTTPException(400, task.result())
+    print(result, type(result), dir(result))
+    print("INITIATING Task done callback")
+    print(DB)
+    db = MongoDB()
+    document_to_update = await db.find(
+        "queries",
+        {"id": object_id},
+        find_one=True
+    )
+    print("Document to update: ", document_to_update)
+    document_to_update = await document_to_update
+    print("Document to update: ", document_to_update)
+    if not document_to_update:
+        document_to_update = QueryResponse(**{"id": object_id}).dict()
+    document_to_update = {
+        **document_to_update,
+        "response": result,
+    }
+    print("Updated document to update:", document_to_update)
+    updated_db = await db.update(
+        "queries",
+        {"id": object_id},
+        data=document_to_update,
+    )
+    print("Updated DB:", await updated_db)
 
 
 @app.post("/", response_model=Query)
 @limiter.limit("20/day")
 async def root(request: Request, query: Query, token: Annotated[str | None, Header()]):
-    async def task_worker(request: Request):
-        task = asyncio.create_task(run_query_prompt(query.prompt), name=str(query.id))
-        task.add_done_callback(partial(task_done_callback, request))
-        await task
 
-    th = threading.Thread(target=lambda request: asyncio.run(task_worker(request)), args=(request,), daemon=True)
+    async def task_worker():
+        print("Starting task worker")
+        print("&" * 100)
+        print(query, query.prompt)
+
+        # async def debug():
+        #     return "debug"
+
+        task = asyncio.ensure_future(run_query_prompt(query.prompt))
+        # task = asyncio.ensure_future(debug())
+        for f in asyncio.as_completed([task]):
+            result_task = await f
+            await task_done_callback(query.id, result_task)
+
+    th = threading.Thread(
+        target=lambda: asyncio.run(task_worker()),
+        daemon=True
+    )
     th.start()
     threads.add(th)
-    print(query.id)
-    result = request.session.get("query_response", "Come back in a few mins to get the results")
-    return {
-        **query.dict(),
-        "response": result,
-    }
+    try:
+        await DB.create_collection("queries")
+        document = await DB.insert_document("queries", **query.dict())
+        print(document)
+        print(document.inserted_id)
+        print(query.id, query.dict())
+
+        result_document = await DB.find(
+            "queries",
+            {"id": document.inserted_id},
+            find_one=True
+        )
+        result = await result_document
+
+        return {
+            **query.dict(),
+            "id": document.inserted_id,
+            "result": result.get("response", query.dict()["response"]) if result else query.dict()["response"]
+        }
+    except Exception as exc:
+        print(traceback.format_exc())
+        raise HTTPException(400, str(exc))
 
 
-@app.get("/tasks/{task_name}", response_model=QueryResponse)
-async def get_task_by_id(request: Request, task_name: str, token: Annotated[str | None, Header()]):
-    print(request.session.get(task_name))
-    if task_name in request.session:
+@app.get("/tasks/{query_id}", response_model=QueryResponse)
+async def get_task_by_id(request: Request, query_id: str, token: Annotated[str | None, Header()]):
+    document = await DB.find(
+        "queries",
+        {"_id": ObjectId(query_id)},
+        find_one=True
+    )
+    result = await document
+    print(result)
+    if result:
         try:
-            return QueryResponse(**{"response": request.session[task_name], "id": task_name}).dict()
+            return QueryResponse(**{"response": result["response"], "id": result["_id"]}).dict()
         except HTTPException as http_exc:
             raise http_exc
     raise HTTPException(
         404,
-        QueryResponse(**{"error": f"task with id {task_name} not found", "id": task_name}).dict()
+        QueryResponse(**{"error": f"task with id {query_id} not found", "id": str(query_id)}).dict()
     )
 
 

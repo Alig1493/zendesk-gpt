@@ -1,12 +1,15 @@
 import asyncio
 import os
+import traceback
+from asyncio import Future, get_running_loop
 from dataclasses import dataclass
-from typing import List
+from typing import List, Any, Dict
 
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import IndexModel
 from pymongo.errors import OperationFailure, CollectionInvalid
-from pymongo.results import UpdateResult
+from pymongo.results import UpdateResult, InsertManyResult, InsertOneResult
 
 
 @dataclass
@@ -17,19 +20,24 @@ class MongoDB:
         self._client = AsyncIOMotorClient(self._mongodb_uri)
         self._db = self._client["GPTTest"]
 
+    def set_mongo_ids(self, documents: List[Dict[str, Any]]) -> None:
+        for document in documents:
+            if "id" in document:
+                document["_id"] = document["id"] if isinstance(document["id"], ObjectId) else ObjectId(document["id"])
+                del document["id"]
+
     async def validate_collection(self, collection_name: str):
+        print(id(get_running_loop()))
         print("Checking if collection exists")
         try:
             # Try to validate a collection
-            done, _ = await asyncio.wait(
-                [self._db.validate_collection(collection_name)],
-                return_when=asyncio.FIRST_EXCEPTION
-            )
-            await done.pop()
-            print("Collection exists")
+            await self._db.validate_collection(collection_name)
         except OperationFailure as operational_failure:  # If the collection doesn't exist
             print(f"{collection_name} collection doesn't exist")
             raise operational_failure
+        except TimeoutError as timeout_error:
+            print(traceback.format_exc())
+            raise timeout_error
 
     async def create_collection(self, collection_name: str):
         try:
@@ -47,10 +55,17 @@ class MongoDB:
         indexes = [IndexModel([index_key]) for index_key in index_keys]
         return self._db.get_collection(collection_name).create_indexes(indexes)
 
-    async def insert_documents(self, collection_name: str, documents: list) -> None:
+    async def insert_documents(self, collection_name: str, documents: List[Dict[str, Any]]) -> InsertManyResult:
+        self.set_mongo_ids(documents)
         collection = await self.get_collection(collection_name)
-        documents = await collection.insert_many(documents)
-        print(documents.inserted_ids, dir(documents))
+        result = await collection.insert_many(documents)
+        return result
+
+    async def insert_document(self, collection_name: str, **document: Dict[str, Any]) -> InsertOneResult:
+        self.set_mongo_ids([document])
+        collection = await self.get_collection(collection_name)
+        result = await collection.insert_one(document)
+        return result
 
     async def find(
         self,
@@ -59,7 +74,7 @@ class MongoDB:
         exclude_fields: tuple = (),
         find_one: bool = False,
         sort: list = None
-    ) -> list | dict:
+    ) -> list | Future:
         collection = await self.get_collection(collection_name)
         fields = {field: False for field in exclude_fields}
         match find_one:
@@ -67,7 +82,7 @@ class MongoDB:
                 return collection.find_one(query, fields or None, sort=sort)
             case False:
                 return [
-                    document async for document in collection.find_many(query, fields or None, sort=sort)
+                    document async for document in collection.find(query, fields or None, sort=sort)
                 ]
 
     async def update(self, collection_name: str, query: dict, data: dict, upsert: bool = False) -> None | UpdateResult:
